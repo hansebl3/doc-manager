@@ -1,0 +1,9 @@
+streamlit
+pandas
+psycopg2-binary
+pgvector
+sentence-transformers
+python-frontmatter
+uuid-utils
+requests
+torch --index-url https://download.pytorch.org/whl/cpu
