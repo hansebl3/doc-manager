@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import json
 import os
+from datetime import datetime
 from db_manager import DBManager
 from llm_client import LLMClient
 from utils.md_processor import MDProcessor
@@ -52,11 +53,18 @@ with tab_upload:
     
     # 2. Manual Input
     st.subheader("2. Manual Text Input")
+    col_m1, col_m2 = st.columns([1, 2])
+    with col_m1:
+        doc_date = st.date_input("Document Date", value=datetime.today(), key="manual_date")
+    
     manual_text = st.text_area("Enter text content directly", height=150)
     if st.button("Add Text to Processing Queue"):
         if manual_text.strip():
-            # Generate ID and fake filename
-            m_uuid = MDProcessor.generate_uuid_v7()
+            # Convert date to timestamp
+            ts = datetime.combine(doc_date, datetime.min.time()).timestamp()
+            
+            # Generate ID and fake filename based on picked date
+            m_uuid = MDProcessor.generate_uuid_v7(timestamp=ts)
             m_filename = f"manual_input_{m_uuid[:8]}.md"
             
             # Upsert L0
@@ -158,6 +166,52 @@ with tab_upload:
     cols[2].metric("Processing L", len(tasks_processing_l))
     cols[3].metric("Processing R", len(tasks_processing_r))
     cols[4].metric("Done (Wait Review)", len(tasks_done))
+
+    # Manage Active Queue
+    st.divider()
+    st.subheader("Manage Active Queue")
+    with st.expander("Show Detailed Queue Management"):
+        all_task_list = tasks_created + tasks_queued + tasks_processing_l + tasks_processing_r + tasks_done
+        if not all_task_list:
+            st.info("No tasks in any status.")
+        else:
+            if tasks_done:
+                if st.button("Clear All 'Done' Tasks"):
+                    for t in tasks_done:
+                        st.session_state.db.delete_task(t['doc_id'])
+                    st.rerun()
+            
+            st.divider()
+            for t in all_task_list:
+                fname = t.get('config', {}).get('filename', str(t['doc_id']))
+                with st.expander(f"**{fname}** - `{t['status']}`"):
+                    doc = st.session_state.db.get_document(t['doc_id'])
+                    if doc:
+                        new_content = st.text_area("Edit Content", value=doc['content'], height=200, key=f"edit_q_{t['doc_id']}")
+                        
+                        c1, c2, c3 = st.columns([1, 1, 1])
+                        if c1.button("Save Changes", key=f"save_q_{t['doc_id']}", type="primary"):
+                            # Re-embed and update
+                            new_emb = st.session_state.embedder.encode(new_content).tolist()
+                            st.session_state.db.upsert_document(
+                                doc['id'], doc['category'], doc['metadata'], new_content, new_emb
+                            )
+                            st.success("Changes saved!")
+                            st.rerun()
+                        
+                        if c2.button("Cancel Task", key=f"can_q_{t['doc_id']}"):
+                            st.session_state.db.delete_task(t['doc_id'])
+                            st.rerun()
+                        
+                        if c3.button("Delete Doc & Task", key=f"del_dq_{t['doc_id']}"):
+                            st.session_state.db.delete_task(t['doc_id'])
+                            st.session_state.db.delete_document(t['doc_id'])
+                            st.rerun()
+                    else:
+                        st.error("Document data not found.")
+                        if st.button("Purge Orphaned Task", key=f"purge_{t['doc_id']}"):
+                            st.session_state.db.delete_task(t['doc_id'])
+                            st.rerun()
 
 # --- Tab 2: Batch Processing ---
 with tab_process:
@@ -373,11 +427,22 @@ with tab_search:
     with col_s3:
         search_uuid = st.text_input("UUID Search")
     
+    st.divider()
+    filter_no_task = st.checkbox("Show only documents WITHOUT an active task")
+    
     cat_filter = None if search_cat == "ALL" else search_cat
     uuid_filter = search_uuid if search_uuid else None
     
     results = st.session_state.db.search_documents(query_text=search_query, category=cat_filter, doc_id=uuid_filter)
     
+    if filter_no_task and results:
+        # Filter out results that have an active task
+        new_results = []
+        for r in results:
+            if not st.session_state.db.get_task(r['id']):
+                new_results.append(r)
+        results = new_results
+
     if results:
         df = pd.DataFrame(results)
         # Drop large columns for display
@@ -394,18 +459,29 @@ with tab_search:
                 c_indent, c_content = st.columns([1, 15])
                 container = c_content
             else:
-                container = st
+                container = st.container()
             
             with container:
                 with st.expander(f"[{row['category']}] {row['id']}"):
                     st.write(f"**Metadata:** {json.dumps(row['metadata'])}")
                     st.write(f"**Content Snippet:** {row['content'][:500]}...")
                     
-                    # RE-SUMMARIZE (Only for L0)
-                    if row['category'] == 'L0':
-                        if st.button(f"Re-summarize {row['id']}", key=f"resum_{row['id']}"):
-                            st.session_state.db.enqueue_task(row['id'], config={"filename": f"Re-Sum: {row['id']}"})
-                            st.success(f"Added {row['id']} to Batch Processing Queue. Go to Tab 2.")
+                    # Queue Status & Re-queue
+                    task = st.session_state.db.get_task(row['id'])
+                    if task:
+                        st.info(f"**Task Status:** `{task['status']}`")
+                    else:
+                        st.warning("No Active Task in Queue")
+                        if st.button(f"Add to Process Queue", key=f"re_q_{row['id']}"):
+                            # Try to get filename from metadata or ID
+                            fname = row['metadata'].get('filename') or str(row['id'])
+                            st.session_state.db.enqueue_task(row['id'], config={"filename": fname})
+                            st.success(f"Added {row['id']} to processing queue!")
+                            st.rerun()
+
+                    # RE-SUMMARIZE (Only for L0 - Legacy or shortcut)
+                    # if row['category'] == 'L0' and not task: 
+                    #    ... (Already covered by the generic 'Add to Process Queue' above)
                             
                     # EDIT CONTENT (Only for L0)
                     if row['category'] == 'L0':

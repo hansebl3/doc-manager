@@ -5,8 +5,8 @@ import os
 
 class MDProcessor:
     @staticmethod
-    def generate_uuid_v7():
-        return str(uuid.uuid7())
+    def generate_uuid_v7(timestamp=None):
+        return str(uuid.uuid7(timestamp=timestamp))
 
     @staticmethod
     def extract_uuid(content, filename=None):
