@@ -6,6 +6,8 @@ import os
 class MDProcessor:
     @staticmethod
     def generate_uuid_v7(timestamp=None):
+        if timestamp is not None:
+            timestamp = int(timestamp)
         return str(uuid.uuid7(timestamp=timestamp))
 
     @staticmethod

@@ -32,7 +32,9 @@ class DBManager:
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS documents (
                         id UUID PRIMARY KEY,
+                        title TEXT,
                         category TEXT NOT NULL,
+                        level TEXT,
                         metadata JSONB,
                         content TEXT,
                         summary_uuids JSONB DEFAULT '[]'::jsonb,
@@ -42,6 +44,33 @@ class DBManager:
                     );
                 """)
                 
+                # Migration: Add level column if not exists and migrate data
+                try:
+                    cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS level TEXT;")
+                    # Migrate L0, L1, L2, L3 from category to level
+                    cur.execute("""
+                        UPDATE documents 
+                        SET level = category, category = 'General' 
+                        WHERE level IS NULL AND category IN ('L0', 'L1', 'L2', 'L3');
+                    """)
+                    # Ensure any remaining NULL levels (if any) are set to 'L0' as default for source if needed, 
+                    # but L1/L2 should have been handled.
+                    cur.execute("UPDATE documents SET level = 'L0' WHERE level IS NULL;")
+                except Exception as e:
+                    logger.warning(f"Migration error (level): {e}")
+
+                # Migration: Add title column if not exists
+                try:
+                    cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS title TEXT;")
+                    # Populate title for existing documents from content or metadata
+                    cur.execute("""
+                        UPDATE documents 
+                        SET title = SUBSTRING(content FROM 1 FOR 20)
+                        WHERE title IS NULL;
+                    """)
+                except Exception as e:
+                    logger.warning(f"Migration error (title): {e}")
+
                 # Migration: Add source_uuids if not exists (for existing DBs)
                 try:
                     cur.execute("ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_uuids JSONB DEFAULT '[]'::jsonb;")
@@ -60,8 +89,9 @@ class DBManager:
                     );
                 """)
 
-                # Index for category and metadata
+                # Index for category, level and metadata
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_docs_category ON documents(category);")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_docs_level ON documents(level);")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_docs_metadata ON documents USING gin(metadata);")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON processing_tasks(status);")
                 
@@ -72,19 +102,21 @@ class DBManager:
         finally:
             conn.close()
 
-    def upsert_document(self, doc_id, category, meta, content, embedding=None):
+    def upsert_document(self, doc_id, category, level, meta, content, embedding=None, title=None):
         conn = self._get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO documents (id, category, metadata, content, embedding)
-                    VALUES (%s, %s, %s, %s, %s)
+                    INSERT INTO documents (id, title, category, level, metadata, content, embedding)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (id) DO UPDATE SET
+                        title = EXCLUDED.title,
                         category = EXCLUDED.category,
+                        level = EXCLUDED.level,
                         metadata = EXCLUDED.metadata,
                         content = EXCLUDED.content,
                         embedding = COALESCE(EXCLUDED.embedding, documents.embedding);
-                """, (doc_id, category, Json(meta), content, embedding))
+                """, (doc_id, title, category, level, Json(meta), content, embedding))
             conn.commit()
             return True
         except Exception as e:
@@ -214,7 +246,7 @@ class DBManager:
         finally:
             conn.close()
 
-    def search_documents(self, query_text=None, category=None, doc_id=None, metadata_filters=None):
+    def search_documents(self, query_text=None, category=None, level=None, doc_id=None, metadata_filters=None):
         conn = self._get_connection()
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -227,6 +259,9 @@ class DBManager:
                 if category:
                     sql += " AND category = %s"
                     params.append(category)
+                if level:
+                    sql += " AND level = %s"
+                    params.append(level)
                 if query_text:
                     sql += " AND content ILIKE %s"
                     params.append(f"%{query_text}%")
@@ -243,16 +278,23 @@ class DBManager:
             conn.close()
 
 
-    def vector_search(self, embedding, limit=5, category=None):
+    def vector_search(self, embedding, limit=5, category=None, level=None):
         conn = self._get_connection()
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 sql = "SELECT *, 1 - (embedding <=> %s) AS cosine_similarity FROM documents"
                 params = [embedding]
                 
+                where_clauses = []
                 if category:
-                    sql += " WHERE category = %s"
+                    where_clauses.append("category = %s")
                     params.append(category)
+                if level:
+                    where_clauses.append("level = %s")
+                    params.append(level)
+                
+                if where_clauses:
+                    sql += " WHERE " + " AND ".join(where_clauses)
                 
                 sql += " ORDER BY embedding <=> %s LIMIT %s"
                 params.extend([embedding, limit])

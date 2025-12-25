@@ -57,7 +57,7 @@ class LLMClient:
         url = f"{self.base_url}/chat/completions"
         headers = {"Content-Type": "application/json"}
         # Expecting JSON response
-        full_prompt = f"{prompt_template}\n\nContent:\n{content}\n\nReturn ONLY a JSON object with 'date' (YYYY-MM-DD or similar) and 'keywords' (list of strings)."
+        full_prompt = f"{prompt_template}\n\nContent:\n{content}\n\nReturn ONLY a JSON object with 'date' (YYYY-MM-DD or similar), 'keywords' (list of strings), and 'title' (a short, descriptive title as a string)."
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": full_prompt}],

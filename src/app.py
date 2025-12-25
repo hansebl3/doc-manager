@@ -7,6 +7,7 @@ from db_manager import DBManager
 from llm_client import LLMClient
 from utils.md_processor import MDProcessor
 from sentence_transformers import SentenceTransformer
+import subprocess
 
 # Page Config
 st.set_page_config(page_title="Documentation Manager", layout="wide")
@@ -24,6 +25,8 @@ if "processed_docs" not in st.session_state:
     st.session_state.processed_docs = {} # {uuid: {meta_l, sum_l, meta_r, sum_r, ...}}
 if "processing_active" not in st.session_state:
     st.session_state.processing_active = False
+if "categories" not in st.session_state:
+    st.session_state.categories = ["General", "Personal", "CTC", "Proposal"]
 
 # Sidebar - Settings & Prompt History
 st.sidebar.title("Settings")
@@ -56,29 +59,41 @@ with tab_upload:
     col_m1, col_m2 = st.columns([1, 2])
     with col_m1:
         doc_date = st.date_input("Document Date", value=datetime.today(), key="manual_date")
+        manual_cat = st.selectbox("Category", st.session_state.categories, key="manual_cat")
     
     manual_text = st.text_area("Enter text content directly", height=150)
+    manual_title_input = st.text_input("Document Title (Optional)", placeholder="Leave blank to use first 20 chars of content")
+    
     if st.button("Add Text to Processing Queue"):
         if manual_text.strip():
-            # Convert date to timestamp
-            ts = datetime.combine(doc_date, datetime.min.time()).timestamp()
+            # Title logic: use input or first 20 chars
+            m_title = manual_title_input.strip() if manual_title_input.strip() else manual_text.strip()[:20]
+            
+            # Convert date to timestamp (integer seconds)
+            ts = int(datetime.combine(doc_date, datetime.min.time()).timestamp())
             
             # Generate ID and fake filename based on picked date
             m_uuid = MDProcessor.generate_uuid_v7(timestamp=ts)
             m_filename = f"manual_input_{m_uuid[:8]}.md"
             
+            # Add to Queue
+            manual_meta = MDProcessor.prepare_metadata(manual_text)
+            manual_meta['date'] = doc_date.strftime("%Y-%m-%d")
+
             # Upsert L0
             parent_emb = st.session_state.embedder.encode(manual_text).tolist()
             st.session_state.db.upsert_document(
                 m_uuid, 
+                manual_cat,
                 "L0", 
-                MDProcessor.prepare_metadata(manual_text), 
+                manual_meta, 
                 manual_text, 
-                parent_emb
+                parent_emb,
+                title=m_title
             )
             
             # Add to Queue
-            st.session_state.db.enqueue_task(m_uuid, config={"filename": m_filename})
+            st.session_state.db.enqueue_task(m_uuid, config={"filename": m_filename, "title": m_title})
             
             st.success(f"Added manual text ({m_filename}) to DB Queue!")
             # Retain text? Streamlit refreshes on button press usually clearing it unless we use session state for the widget. 
@@ -89,6 +104,7 @@ with tab_upload:
     if uploaded_files:
         st.divider()
         st.subheader("Detected Files")
+        upload_cat = st.selectbox("Set Category for All Uploads", st.session_state.categories, key="upload_cat")
         
         for u_file in uploaded_files:
             content = u_file.read().decode("utf-8")
@@ -129,22 +145,11 @@ with tab_upload:
             count = 0
             for doc in valid_docs:
                 # Add to DB Processing Queue
-                st.session_state.db.enqueue_task(doc['id'], config={"filename": doc['filename']}) # Save filename in config for display
+                st.session_state.db.enqueue_task(doc['id'], config={"filename": doc['filename'], "title": doc['filename']}) # Save filename in config for display
                 
                 # Upsert partial L0
                 parent_emb = st.session_state.embedder.encode(doc['content']).tolist()
-                st.session_state.db.upsert_document(doc['id'], "L0", doc['metadata'], doc['content'], parent_emb)
-                
-                count += 1
-            st.success(f"Added {count} documents to DB Queue. Go to 'Batch Processing'.")
-            count = 0
-            for doc in valid_docs:
-                # Add to DB Processing Queue
-                st.session_state.db.enqueue_task(doc['id'], config={"filename": doc['filename']}) # Save filename in config for display
-                
-                # Upsert partial L0
-                parent_emb = st.session_state.embedder.encode(doc['content']).tolist()
-                st.session_state.db.upsert_document(doc['id'], "L0", doc['metadata'], doc['content'], parent_emb)
+                st.session_state.db.upsert_document(doc['id'], upload_cat, "L0", doc['metadata'], doc['content'], parent_emb, title=doc['filename'])
                 
                 count += 1
             st.success(f"Added {count} documents to DB Queue. Go to 'Batch Processing'.")
@@ -194,7 +199,7 @@ with tab_upload:
                             # Re-embed and update
                             new_emb = st.session_state.embedder.encode(new_content).tolist()
                             st.session_state.db.upsert_document(
-                                doc['id'], doc['category'], doc['metadata'], new_content, new_emb
+                                doc['id'], doc['category'], doc['level'], doc['metadata'], new_content, new_emb
                             )
                             st.success("Changes saved!")
                             st.rerun()
@@ -212,6 +217,25 @@ with tab_upload:
                         if st.button("Purge Orphaned Task", key=f"purge_{t['doc_id']}"):
                             st.session_state.db.delete_task(t['doc_id'])
                             st.rerun()
+
+    # Worker Status Check
+    def is_worker_running():
+        try:
+            cmd = "ps aux | grep '[w]orker.py'"
+            result = subprocess.check_output(cmd, shell=True).decode()
+            return len(result.strip()) > 0
+        except:
+            return False
+
+    st.sidebar.divider()
+    worker_ok = is_worker_running()
+    if worker_ok:
+        st.sidebar.success("✅ Worker: Running")
+    else:
+        st.sidebar.error("❌ Worker: Stopped")
+        if st.sidebar.button("Try Start Worker"):
+            subprocess.Popen(["python3", "src/worker.py"], start_new_session=True)
+            st.rerun()
 
 # --- Tab 2: Batch Processing ---
 with tab_process:
@@ -232,7 +256,7 @@ with tab_process:
                                        value=st.session_state.get("prompt_summary", "Summarize the following document concisely."),
                                        height=100)
             prompt_meta = st.text_area("Metadata Prompt", 
-                                       value=st.session_state.get("prompt_meta", "Extract the document date and key technical keywords."),
+                                       value=st.session_state.get("prompt_meta", "Extract the document date, key technical keywords, and a short descriptive title."),
                                        height=100)
         
         with col_ctrl:
@@ -339,13 +363,32 @@ with tab_review:
         st.subheader("1. Keywords & Metadata")
         kw_l = res['meta_l'].get("keywords", [])
         kw_r = res['meta_r'].get("keywords", [])
-        all_keywords = sorted(list(set(kw_l + kw_r)))
+        
+        # Smart Deduplication
+        def normalize_kw(s):
+            return "".join(s.lower().split())
+
+        seen_normalized = {}
+        unique_keywords = []
+        for k in kw_l + kw_r:
+            norm = normalize_kw(k)
+            if norm not in seen_normalized:
+                seen_normalized[norm] = k
+                unique_keywords.append(k)
+        
+        all_keywords = sorted(unique_keywords)
         
         col_k1, col_k2 = st.columns([3, 1])
         with col_k1:
             selected_keywords = st.multiselect("Select Keywords", all_keywords, default=all_keywords)
         with col_k2:
-            final_date = st.text_input("Date", value=res['meta_l'].get("date", res['meta_r'].get("date", "")))
+            extracted_date = res['meta_l'].get("date") or res['meta_r'].get("date")
+            if not extracted_date or extracted_date == "unknown":
+                existing_doc = st.session_state.db.get_document(selected_task_id)
+                if existing_doc and existing_doc.get('metadata'):
+                    extracted_date = existing_doc['metadata'].get('date', "")
+            
+            final_date = st.text_input("Date", value=extracted_date if extracted_date else "")
 
         st.divider()
         
@@ -370,6 +413,16 @@ with tab_review:
         # 3. Final Edit
         st.subheader("3. Final Edit & Save")
         
+        # Suggested L1 Title
+        existing_doc = st.session_state.db.get_document(selected_task_id)
+        parent_title = existing_doc.get('title', 'Document') if existing_doc else 'Document'
+        
+        # Recommendation Logic: Use AI title if available, otherwise parent_title - Summary
+        ai_recommended_title = res['meta_l'].get("title") or res['meta_r'].get("title")
+        suggested_l1_title = ai_recommended_title if ai_recommended_title else f"{parent_title} - Summary"
+        
+        l1_title_input = st.text_input("Summary Title", value=suggested_l1_title, key=f"l1_title_{selected_task_id}")
+
         # Use a key that changes with choice so base_text updates correctly
         final_summary_text = st.text_area("Final Summary Content", value=base_text, height=300, key=f"final_{selected_task_id}_{choice}")
         
@@ -380,15 +433,19 @@ with tab_review:
                 
                 # Fetch original to keep other metadata? 
                 # We already have valid metadata in L0 doc from Tab 1 upload.
-                existing_doc = st.session_state.db.get_document(doc_id)
+                # existing_doc was fetched above for title
                 original_meta = existing_doc['metadata'] if existing_doc else {}
                 
-                # Metadata for L0 update
-                final_meta = {
+                # Metadata for L1 (Summary) - As per user request: Keywords belong here
+                final_meta_l1 = {
                     "keywords": selected_keywords,
                     "date": final_date,
-                    "original_meta": original_meta # Keep existing meta structure
+                    "parent_id": doc_id
                 }
+                
+                # Metadata for L0 update (Keep it clean, maybe just the date or keep original)
+                final_meta_l0 = existing_doc['metadata'] if existing_doc else {}
+                final_meta_l0['date'] = final_date # Keep date in L0 for searchability
                 
                 # Delete old summaries if exist (Re-summarization flow)
                 # Requirement: "Delete existing summary... and delete summary uuid from document"
@@ -399,13 +456,14 @@ with tab_review:
                         # 2. Remove the link from the parent (L0)
                         st.session_state.db.remove_summary_link(doc_id, old_sum_id)
                 
-                # Upsert L0 (Update metadata)
-                # Content is already in DB from Tab 1 upload
-                st.session_state.db.upsert_document(doc_id, "L0", final_meta, existing_doc['content'])
+                # Upsert L0 (Update metadata - minimally)
+                st.session_state.db.upsert_document(doc_id, existing_doc['category'], "L0", final_meta_l0, existing_doc['content'], title=existing_doc.get('title'))
                 
-                # Save Summary (L1)
+                # Save Summary (L1) with FULL metadata
                 summary_emb = st.session_state.embedder.encode(final_summary_text).tolist()
-                st.session_state.db.upsert_document(summary_id, "L1", {}, final_summary_text, summary_emb)
+                # Use User provided title
+                l1_title = l1_title_input.strip() if l1_title_input.strip() else f"{parent_title} - Summary"
+                st.session_state.db.upsert_document(summary_id, existing_doc['category'], "L1", final_meta_l1, final_summary_text, summary_emb, title=l1_title)
                 
                 # Link (Mutual)
                 st.session_state.db.link_documents(doc_id, summary_id)
@@ -419,21 +477,28 @@ with tab_review:
 # --- Tab 4: Search & View ---
 with tab_search:
     st.header("Search Knowledge Base")
-    col_s1, col_s2, col_s3 = st.columns([2, 1, 1])
+    col_s1, col_s2, col_s3, col_s4 = st.columns([2, 1, 1, 1])
     with col_s1:
         search_query = st.text_input("Text Search")
     with col_s2:
-        search_cat = st.selectbox("Category", ["ALL", "L0", "L1", "L2", "L3"])
+        search_cat = st.selectbox("Category Filter", ["ALL"] + st.session_state.categories)
     with col_s3:
+        search_lvl = st.selectbox("Level Filter", ["ALL", "L0", "L1", "L2", "L3"])
+    with col_s4:
         search_uuid = st.text_input("UUID Search")
     
     st.divider()
-    filter_no_task = st.checkbox("Show only documents WITHOUT an active task")
+    col_opt1, col_opt2 = st.columns(2)
+    with col_opt1:
+        filter_no_task = st.checkbox("Show only documents WITHOUT an active task")
+    with col_opt2:
+        auto_expand_parent = st.checkbox("Automatically show parent content for summaries", value=True)
     
     cat_filter = None if search_cat == "ALL" else search_cat
+    lvl_filter = None if search_lvl == "ALL" else search_lvl
     uuid_filter = search_uuid if search_uuid else None
     
-    results = st.session_state.db.search_documents(query_text=search_query, category=cat_filter, doc_id=uuid_filter)
+    results = st.session_state.db.search_documents(query_text=search_query, category=cat_filter, level=lvl_filter, doc_id=uuid_filter)
     
     if filter_no_task and results:
         # Filter out results that have an active task
@@ -454,17 +519,31 @@ with tab_search:
         st.dataframe(display_df, use_container_width=True)
         
         for idx, row in df.iterrows():
-            # Indentation for L1
-            if row['category'] == 'L1':
+            # Indentation for summaries
+            is_summary = row['level'] in ['L1', 'L2', 'L3']
+            if is_summary:
                 c_indent, c_content = st.columns([1, 15])
                 container = c_content
             else:
                 container = st.container()
             
             with container:
-                with st.expander(f"[{row['category']}] {row['id']}"):
-                    st.write(f"**Metadata:** {json.dumps(row['metadata'])}")
-                    st.write(f"**Content Snippet:** {row['content'][:500]}...")
+                display_name = row['title'] if row['title'] else row['id']
+                with st.expander(f"[{row['category']} / {row['level']}] {display_name}"):
+                    c_info, c_down = st.columns([4, 1])
+                    with c_down:
+                        st.download_button(
+                            label="Download MD",
+                            data=row['content'],
+                            file_name=f"{display_name}.md",
+                            mime="text/markdown",
+                            key=f"dl_{row['id']}"
+                        )
+                    
+                    with c_info:
+                        st.write(f"**Title:** {row['title']}")
+                        st.write(f"**Metadata:** {json.dumps(row['metadata'], ensure_ascii=False)}")
+                        st.write(f"**Content Snippet:** {row['content'][:500]}...")
                     
                     # Queue Status & Re-queue
                     task = st.session_state.db.get_task(row['id'])
@@ -490,7 +569,7 @@ with tab_search:
                             if st.button("Save & Reset Summaries", key=f"save_{row['id']}"):
                                 new_emb = st.session_state.embedder.encode(new_content).tolist()
                                 st.session_state.db.upsert_document(
-                                    row['id'], "L0", row['metadata'], new_content, new_emb
+                                    row['id'], row['category'], row['level'], row['metadata'], new_content, new_emb
                                 )
                                 if row.get('summary_uuids'):
                                     for sum_id in row['summary_uuids']:
@@ -499,12 +578,27 @@ with tab_search:
                                 st.success("Content updated and old summaries removed.")
                                 st.rerun()
 
-                    if row['category'] == 'L1':
-                        parent_uuid = row['metadata'].get('parent_id') or row.get('metadata', {}).get('original_meta', {}).get('parent_id')
-                        if parent_uuid and st.button(f"Show Parent (L0): {parent_uuid}", key=f"btn_{row['id']}"):
-                            parent = st.session_state.db.get_document(parent_uuid)
-                            if parent:
-                                st.info(f"**Parent Content:**\n{parent['content']}")
+                    if is_summary:
+                        # Use source_uuids from DB if available, else fallback to metadata
+                        parent_uuids = row.get('source_uuids') or []
+                        
+                        # Fallback for older records or if source_uuids is in metadata
+                        if not parent_uuids:
+                            m_p_id = row['metadata'].get('parent_id') or row.get('metadata', {}).get('original_meta', {}).get('parent_id')
+                            if m_p_id:
+                                parent_uuids = [m_p_id]
+                        
+                        if parent_uuids:
+                            for p_uuid in parent_uuids:
+                                if auto_expand_parent:
+                                    parent = st.session_state.db.get_document(p_uuid)
+                                    if parent:
+                                        st.info(f"**Parent Context ({parent['category']} / {parent['level']}):**\n\n{parent['content']}")
+                                else:
+                                    if st.button(f"Show Parent ({p_uuid[:8]})", key=f"btn_{row['id']}_{p_uuid}"):
+                                        parent = st.session_state.db.get_document(p_uuid)
+                                        if parent:
+                                            st.info(f"**Parent Content:**\n{parent['content']}")
                     
                     if row['summary_uuids'] and len(row['summary_uuids']) > 0:
                         st.write("**Related Summaries (L1):**")
@@ -523,14 +617,14 @@ with tab_search:
                         with col_conf:
                             if st.button("Yes, DELETE", key=f"yes_{row['id']}", type="primary"):
                                 # Cascading Delete Logic
-                                if row['category'] == 'L0' and row.get('summary_uuids'):
+                                if row['level'] == 'L0' and row.get('summary_uuids'):
                                     st.warning(f"Deleting L0 {row['id']} and {len(row['summary_uuids'])} linked summaries.")
                                     for sum_id in row['summary_uuids']:
                                         st.session_state.db.delete_document(sum_id)
                                 
                                 st.session_state.db.delete_document(row['id'])
                                 
-                                if row['category'] == 'L1':
+                                if row['level'] == 'L1':
                                      if row.get('source_uuids'):
                                          for src in row['source_uuids']:
                                              st.session_state.db.remove_summary_link(src, row['id'])
