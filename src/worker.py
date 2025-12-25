@@ -53,7 +53,6 @@ class BackgroundWorker:
                 # though here we have one. Good practice.)
                 # Also, we want to run Left Model first for ALL, then Right Model for ALL.
                 
-                # --- Phase 1: Left Model (All Docs) ---
                 for task in tasks:
                     doc_id = task['doc_id']
                     config = task['config']
@@ -64,68 +63,35 @@ class BackgroundWorker:
                         self.db.update_task(doc_id, status='failed', results={"error": "Document not found"})
                         continue
 
-                    # Update status to processing_l
-                    self.db.update_task(doc_id, status='processing_l')
+                    # Update status to processing
+                    self.db.update_task(doc_id, status='processing')
                     
                     try:
-                        # Extract Meta Left
-                        logger.info(f"Processing {doc_id} - Left Meta")
-                        meta_l = self.llm.extract_metadata(doc['content'], config['model_l'], config['prompt_meta'])
-                        
-                        # Generate Summary Left
-                        logger.info(f"Processing {doc_id} - Left Summary")
-                        sum_l = self.llm.generate_content(doc['content'], config['model_l'], config['prompt_summary'])
-                        
-                        # Save Intermediate Results
-                        # Note: We need to merge with existing results if any (though usually empty at start)
                         current_results = task['results'] or {}
+                        
+                        # --- Left Model ---
+                        logger.info(f"Processing {doc_id} - Left Model ({config.get('model_l')})")
+                        meta_l = self.llm.extract_metadata(doc['content'], config['model_l'], config['prompt_meta'])
+                        sum_l = self.llm.generate_content(doc['content'], config['model_l'], config['prompt_summary'])
                         current_results['meta_l'] = meta_l
                         current_results['sum_l'] = sum_l
                         
+                        # Save partial (optional, but good for debugging)
                         self.db.update_task(doc_id, results=current_results)
                         
-                    except Exception as e:
-                        logger.error(f"Error processing Left Model for {doc_id}: {e}")
-                        self.db.update_task(doc_id, status='failed', results={"error": str(e)})
-
-                # --- Phase 2: Right Model (All Docs) ---
-                # Re-fetch or iterate same list? 
-                # If we iterate same list, we assume they didn't fail in phase 1.
-                # Let's re-check status just to be safe or just continue if status is not failed.
-                
-                for task in tasks:
-                    doc_id = task['doc_id']
-                    # Check current status from DB to see if it failed in Phase 1
-                    current_task = self.db.get_task(doc_id)
-                    if current_task['status'] == 'failed':
-                        continue
-                        
-                    config = current_task['config']
-                    # We already have results in DB, so we append to them.
-                    current_results = current_task['results']
-                    doc = self.db.get_document(doc_id)
-                    
-                    # Update status to processing_r
-                    self.db.update_task(doc_id, status='processing_r')
-                    
-                    try:
-                        # Extract Meta Right
-                        logger.info(f"Processing {doc_id} - Right Meta")
+                        # --- Right Model ---
+                        logger.info(f"Processing {doc_id} - Right Model ({config.get('model_r')})")
                         meta_r = self.llm.extract_metadata(doc['content'], config['model_r'], config['prompt_meta'])
-                        
-                        # Generate Summary Right
-                        logger.info(f"Processing {doc_id} - Right Summary")
                         sum_r = self.llm.generate_content(doc['content'], config['model_r'], config['prompt_summary'])
-                        
-                        # Save Final Results
                         current_results['meta_r'] = meta_r
                         current_results['sum_r'] = sum_r
                         
+                        # Complete
                         self.db.update_task(doc_id, status='done', results=current_results)
                         logger.info(f"Completed {doc_id}")
                         
                     except Exception as e:
-                        logger.error(f"Error processing Right Model for {doc_id}: {e}")
+                        logger.error(f"Error processing {doc_id}: {e}")
                         self.db.update_task(doc_id, status='failed', results={"error": str(e)})
                 
                 logger.info("Batch complete. Waiting for new tasks...")

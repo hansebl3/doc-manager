@@ -1,5 +1,7 @@
 [
-    "Extract the document date and key technical keywords.",
-    "Extract the document date and 5 keywords.",
-    "Summarize the following document concisely."
+    "Extract the document date, key technical keywords, and a short descriptive title (around 20 characters). Return ONLY a JSON object with 'date' (YYYY-MM-DD or similar), 'keywords' (list of strings), and 'title' (A short, descriptive title as a string. MANDATORY: DO NOT LEAVE EMPTY).",
+    "Extract the document date, key technical keywords, and a short descriptive title. Return ONLY a JSON object with 'date' (YYYY-MM-DD or similar), 'keywords' (list of strings), and 'title' (A short, descriptive title as a string. MANDATORY: DO NOT LEAVE EMPTY).",
+    "Summarize the following document concisely.",
+    "\ud0a4\uc6cc\ub4dc\ub97c \ub2e8\uc5b4\ub85c 5\uac1c \ucd94\ucd9c\ud560 \uac83",
+    "3\uc904\ub85c \uac04\ub2e8\ud788 \uc694\uc57d\ud560\uac83, \ud3c9\uac00, \ucd94\uce21 \ud558\uc9c0 \ub9d0\uace0 \ubb38\uc11c\uc5d0 \ub0b4\uc6a9\uc5d0 \ucda9\uc2dd\ud560\uac83"
 ]

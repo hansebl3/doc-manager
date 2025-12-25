@@ -57,7 +57,7 @@ class LLMClient:
         url = f"{self.base_url}/chat/completions"
         headers = {"Content-Type": "application/json"}
         # Expecting JSON response
-        full_prompt = f"{prompt_template}\n\nContent:\n{content}\n\nReturn ONLY a JSON object with 'date' (YYYY-MM-DD or similar), 'keywords' (list of strings), and 'title' (a short, descriptive title as a string)."
+        full_prompt = f"{prompt_template}\n\nContent:\n{content}\n\nReturn ONLY a JSON object with 'date' (YYYY-MM-DD or similar), 'keywords' (list of strings), and 'title' (a short, descriptive title as a string. MANDATORY: ALWAYS GENERATE A TITLE)."
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": full_prompt}],
@@ -71,7 +71,7 @@ class LLMClient:
             return json.loads(data['choices'][0]['message']['content'])
         except Exception as e:
             logger.error(f"Metadata extract error: {e}")
-            return {"date": "unknown", "keywords": []}
+            return {"date": "unknown", "keywords": [], "title": "unknown"}
             
     def get_available_models(self):
         try:
